@@ -15,6 +15,7 @@ class WC_CSR_Sessions  {
 	private $current_customer_id = null;
 
 	private $csr = null;
+	private $holds = [];
 
 	public function __construct( $csr = null ) {
 		$this->csr = $csr;
@@ -44,34 +45,54 @@ class WC_CSR_Sessions  {
 	protected function prime_cache() {
 		global $wpdb;
 
-		if ( version_compare( WOOCOMMERCE_VERSION, '2.5' ) >= 0 ) {
-			// WooCommerce >= 2.5 stores session data in a separate table
-			$results = $wpdb->get_results( "SELECT session_key, session_value, session_expiry FROM {$wpdb->prefix}woocommerce_sessions", OBJECT );
-		} else {
-			$results = $wpdb->get_results( "SELECT option_name, option_value as session_value FROM {$wpdb->options} WHERE option_name LIKE '_wc_session_%'", OBJECT );
-			// @TODO Need to figure out how < 2.5 did expiry
-		}
-		if ( $results ) {
-			foreach ( $results as $result ) {
-				if ( isset( $result->option_name ) ) {
-					// Remove '_wc_session_' from string to get cart ID (on WC < 3.0)
-					$customer_id = substr( $result->option_name, 12 );
-				} else {
-					$customer_id = $result->session_key;
-				}
-				if ( empty( $result->session_expiry ) ) {
-					// @TODO Temporary till figure out what < 2.5 did
-					$expiry = time() + 60 * 60 * 48;
-				} else {
-					$expiry = $result->session_expiry;
-				}
+        // WooCommerce >= 2.5 stores session data in a separate table
+        $results = $wpdb->get_results( "SELECT session_key, session_value, session_expiry FROM {$wpdb->prefix}woocommerce_sessions", OBJECT );
+		if ( empty($results) ) { return null; }
 
-				if ( !array_key_exists( $customer_id, $this->sessions ) ) {
-					$this->sessions[ $customer_id ] = new WC_CSR_Session( $customer_id, $result->session_value, $expiry );
-					wp_cache_set( $this->get_cache_prefix() . $customer_id, $result->session_value, WC_SESSION_CACHE_GROUP, $expiry - time() );
-				}
-			}
-		}
+        $current_date = time();
+        foreach ( $results as $result ) {
+            $expiry = $result->session_expiry;
+
+            $session_data = maybe_unserialize($result->session_value);
+            if(isset($session_data['cart'])){
+                $cart = maybe_unserialize($session_data['cart']);
+                foreach($cart as $item){
+                    if(!isset($item['quantity'])){continue;}
+
+                    $pid = $item['product_id'];
+
+                    //set default quantity
+                    $this->holds[$pid] = isset($this->holds[$pid]) ? $this->holds[$pid] : ['expiry' => PHP_INT_MAX, 'count' => 0];
+                    $this->holds[$pid]['count'] += $item['quantity'];
+                    $this->holds[$pid]['expiry'] = min($this->holds[$pid]['expiry'], $expiry);
+                }
+            }
+
+            $customer_id = $result->session_key;
+
+            $expiry = empty( $result->session_expiry ) ? (60 * 60 * 48) : ($result->session_expiry - $current_date);
+
+            if ( !array_key_exists( $customer_id, $this->sessions ) ) {
+                $this->sessions[ $customer_id ] = new WC_CSR_Session( $customer_id, $result->session_value, $expiry );
+                wp_cache_set( $this->get_cache_prefix() . $customer_id, $result->session_value, WC_SESSION_CACHE_GROUP, $expiry);
+            }
+        }
+
+		$table      = "{$wpdb->prefix}csr_holds";
+        $hold_count = $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+        $expired    = $wpdb->get_var("SELECT COUNT(expiry) FROM {$table} WHERE expiry<{$current_date}");
+
+        if($expired > 0 || $hold_count == 0){
+            $wpdb->query("TRUNCATE TABLE $table");
+            foreach ($this->holds as $pid => $item){
+                $wpdb->replace($table, [
+                    'product'=> $pid,
+                    'count'  => $item['count'],
+                    'expiry' => $item['expiry'],
+                ]);
+            }
+        }
+
 		return $this->sessions;
 	}
 
