@@ -49,7 +49,9 @@ function wc_csr_init(){
     require_once plugin_dir_path( __FILE__ ) . 'includes/class-wc-csr-customer.php';
     require_once plugin_dir_path( __FILE__ ) . 'includes/class-wc-csr-expiry.php';
 
-    WC_Cart_Stock_Reducer::init();
+    if(class_exists('WC_Cart_Stock_Reducer')){
+        WC_Cart_Stock_Reducer::init();
+    }
 }
 
 add_action( 'init' , 'wc_csr_init');
