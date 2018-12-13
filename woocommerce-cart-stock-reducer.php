@@ -33,10 +33,25 @@ if ( ! defined( 'ABSPATH' ) ) exit;
 function make_cart_stock_reducer_go_now( $integrations = array() ) {
 	if ( class_exists( 'WC_Integration' ) ) {
 		// Three... Two... One... MAKE ROCKET GO NOW!
-		require_once plugin_dir_path( __FILE__ ) . 'includes/class-woocommerce-cart-stock-reducer.php';
+        require_once plugin_dir_path( __FILE__ ) . 'includes/class-woocommerce-cart-stock-reducer.php';
 		$integrations[] = 'WC_Cart_Stock_Reducer';
 		return $integrations;
 	}
 }
 
 add_action( 'woocommerce_integrations', 'make_cart_stock_reducer_go_now' );
+
+function wc_csr_init(){
+    require_once plugin_dir_path( __FILE__ ) . 'includes/class-wc-csr-sessions.php';
+    require_once plugin_dir_path( __FILE__ ) . 'includes/class-wc-csr-model.php';
+
+    require_once plugin_dir_path( __FILE__ ) . 'includes/class-wc-csr-admin.php';
+    require_once plugin_dir_path( __FILE__ ) . 'includes/class-wc-csr-customer.php';
+    require_once plugin_dir_path( __FILE__ ) . 'includes/class-wc-csr-expiry.php';
+
+    if(class_exists('WC_Cart_Stock_Reducer')){
+        WC_Cart_Stock_Reducer::init();
+    }
+}
+
+add_action( 'init' , 'wc_csr_init');

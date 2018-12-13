@@ -1,207 +1,110 @@
 <?php
-
-// Exit if accessed directly
-if ( ! defined( 'ABSPATH' ) ) exit;
+if ( ! defined( 'ABSPATH' ) ){ exit; }
 
 /**
  *
  * Class WC_CSR_Sessions
+ * Read WC Session and turn it into reserved quantity
  *
  */
-class WC_CSR_Sessions  {
+final class WC_CSR_Sessions  {
+    private static $inst;
+	public static function Instance(){
+	    static::$inst = isset(static::$inst) ? static::$inst : new WC_CSR_Sessions();
+	    return static::$inst;
+    }
 
-	private $sessions = array();
+    const FILTER_AFTER_PARSE_SESSIONS = 'wc_csr_filter_after_parse_sessions';
+    public $holds = [];
 
-	private $current_customer_id = null;
+	private function __construct() {
+        global $wpdb;
+        $table      = "{$wpdb->prefix}csr_holds";
 
-	private $csr = null;
+//        if($this->read_from_cache($table) === true) return; //already read from cache.. done!
 
-	public function __construct( $csr = null ) {
-		$this->csr = $csr;
+        //cache outdated, sync from wc sessions
+        $results = $wpdb->get_results( "SELECT session_value, session_expiry FROM {$wpdb->prefix}woocommerce_sessions", OBJECT );
+        foreach ( $results as $result ) {
+            $session_data = maybe_unserialize($result->session_value);
 
-		$WC = WC();
-		if ( isset( $WC, $WC->session ) ) {
-			// Pre-prime with the current customers session
-			$this->current_customer_id = $customer_id = $WC->session->get_customer_id();
-			$this->sessions[ $customer_id ] = $WC->session;
-		}
-		// @TODO Need method of keeping track of all sessions saved in cache so we can prime from cache vs DB
-		$this->prime_cache();
-		add_filter( 'manage_product_posts_columns', array( $this, 'product_columns' ), 11, 1 );
-		add_action( 'manage_product_posts_custom_column', array( $this, 'render_product_columns' ), 11, 1 );
+            if(isset($session_data['cart'])){
+                $carts = maybe_unserialize($session_data['cart']);
+                foreach($carts as $cart) {
+                    if(!isset($cart['quantity'])){continue;}
+                    $this->apply_cart_to_holds($cart['product_id'], $cart['quantity'], $result->session_expiry);
+                    $this->apply_cart_to_holds($cart['variation_id'], $cart['quantity'], $result->session_expiry);
+                }
+            }
+        }
+
+        //loop holds to find children
+
+        foreach ($this->holds as $pid => $item){
+            wc_get_product( $pid );
+        }
+        $this->holds = apply_filters(WC_CSR_Sessions::FILTER_AFTER_PARSE_SESSIONS, $this->holds);
+
+//        $this->save_holds($table);
 	}
 
-	/**
-	 * Gets a cache prefix. This is used in session names so the entire cache can be invalidated with 1 function call.
-	 *
-	 * @return string
-	 */
-	private function get_cache_prefix() {
-		return WC_Cache_Helper::get_cache_prefix( WC_SESSION_CACHE_GROUP );
-	}
+	private function read_from_cache($table){
+	    global $wpdb;
 
+        $current_date = time();
+        $hold_count = $wpdb->get_var("SELECT COUNT(*) FROM {$table}");
+        $expired    = $wpdb->get_var("SELECT COUNT(expiry) FROM {$table} WHERE expiry<{$current_date}");
 
-	protected function prime_cache() {
-		global $wpdb;
+        if($expired > 0 || $hold_count == 0){
+            //cache expired or cache is empty.. do not read from cache.
+            return false;
+        }
 
-		if ( version_compare( WOOCOMMERCE_VERSION, '2.5' ) >= 0 ) {
-			// WooCommerce >= 2.5 stores session data in a separate table
-			$results = $wpdb->get_results( "SELECT session_key, session_value, session_expiry FROM {$wpdb->prefix}woocommerce_sessions", OBJECT );
-		} else {
-			$results = $wpdb->get_results( "SELECT option_name, option_value as session_value FROM {$wpdb->options} WHERE option_name LIKE '_wc_session_%'", OBJECT );
-			// @TODO Need to figure out how < 2.5 did expiry
-		}
-		if ( $results ) {
-			foreach ( $results as $result ) {
-				if ( isset( $result->option_name ) ) {
-					// Remove '_wc_session_' from string to get cart ID (on WC < 3.0)
-					$customer_id = substr( $result->option_name, 12 );
-				} else {
-					$customer_id = $result->session_key;
-				}
-				if ( empty( $result->session_expiry ) ) {
-					// @TODO Temporary till figure out what < 2.5 did
-					$expiry = time() + 60 * 60 * 48;
-				} else {
-					$expiry = $result->session_expiry;
-				}
+        //load from cached db
+        $results = $wpdb->get_results( "SELECT `pid`, `count`, `expiry` FROM {$table}", OBJECT );
+        foreach ( $results as $result ) {
+            $this->holds[$result->pid] = [
+                'count' => $result->count,
+                'expiry' => $result->expiry
+            ];
+        }
 
-				if ( !array_key_exists( $customer_id, $this->sessions ) ) {
-					$this->sessions[ $customer_id ] = new WC_CSR_Session( $customer_id, $result->session_value, $expiry );
-					wp_cache_set( $this->get_cache_prefix() . $customer_id, $result->session_value, WC_SESSION_CACHE_GROUP, $expiry - time() );
-				}
-			}
-		}
-		return $this->sessions;
-	}
+        return true;
+    }
 
-	public function get_sessions() {
-		return $this->sessions;
-	}
+	private function apply_cart_to_holds($pid, $quantity, $expiry){
+	    if($pid == 0)return;
 
-	public function get_session( $session = null ) {
-		if ( isset( $session, $this->sessions[ $session ] ) ) {
-			return $this->sessions[ $session ];
-		}
-		return null;
-	}
+        //set default quantity
+        $this->holds[$pid] = isset($this->holds[$pid]) ? $this->holds[$pid] : ['expiry' => PHP_INT_MAX, 'count' => 0];
+        $this->holds[$pid]['count'] += $quantity;
+        $this->holds[$pid]['expiry'] = min($this->holds[$pid]['expiry'], $expiry);
+    }
+
+    private function save_holds($table){
+        global $wpdb;
+
+        $wpdb->query("TRUNCATE TABLE $table");
+        foreach ($this->holds as $pid => $item){
+            $wpdb->replace($table, [
+                'pid'    => $pid,
+                'count'  => $item['count'],
+                'expiry' => $item['expiry'],
+            ]);
+        }
+    }
 
 	/**
 	 * Search through all sessions and count quantity of $item in all carts
 	 *
 	 * @param int $item WooCommerce item ID
-	 * @param string $field Which field to use to match.  'variation_id' or 'product_id'
-	 * @param bool $ignore true if active users count should be ignored
+	 * @param string $field Which field to use to match. 'product_id'
 	 *
 	 * @return int|double Total number of items
 	 */
-	public function quantity_in_carts( $item, $field = 'product_id', $ignore = false ) {
-		$quantity = 0;
-		$item = (int) $item;
-		$customer_id = null;
-
-		/**
-		 * The old method of querying per item on a page wasn't scalable (especially with WC > 3.0) which would
-		 * end up running the query multiple times per item.
-		 *
-		 * Presumably most sites have a limited number of active sessions/carts, so pre-cache all of the sessions.
-		 * This does double duty since it uses the same cache groups as WC already does.
-		 *
-		 * I'm guessing this will have to be revisted when someone has tons of active sessions comes along, maybe
-		 * by then this functionality will be built into WC
-		 */
-
-		$items = $this->find_items_in_carts( $item );
-
-		foreach ( $items as $session_id => $item_data ) {
-			if ( $ignore && $session_id == $this->current_customer_id ) {
-				// Skip users own items if $ignore is true
-				continue;
-			}
-			if ( true === apply_filters( 'wc_csr_skip_cart_item', false, $item, $session_id, $item_data, $this ) ) {
-				// Allow users to determine if items should be ignored in the total count.
-				// Useful only if you want specific users items to be counted in the virtual stock
-				continue;
-			}
-			if ( isset( $item_data['csr_expire_time'] ) ) {
-				if ( $session = $this->get_session( $session_id ) ) {
-					$order_awaiting_payment = $session->get( 'order_awaiting_payment', null );
-				} else {
-					$order_awaiting_payment = null;
-				}
-				if ( $this->csr->is_expired( $item_data['csr_expire_time'], $order_awaiting_payment ) ) {
-					// Skip items that are expired in carts
-					continue;
-				}
-			}
-
-
-			if ( $item === $item_data['product_id'] || $item === $item_data['variation_id'] ) {
-				$quantity += $item_data['quantity'];
-			}
-		}
-
-		// Force quantity to number, but allow other than int
-		return 0 + $quantity;
+	public function quantity_in_carts( $product_id ) {
+        return isset($this->holds[$product_id]) ? $this->holds[$product_id]['count'] : 0;
 	}
 
-	public function find_items_in_carts( $item ) {
-		$items = array();
 
-		foreach ( $this->sessions as $session_id => $session ) {
-			if ( $cart = $session->cart ) {
-				foreach ( $session->cart as $cart_id => $cart_item ) {
-					if ( $item === $cart_item['product_id'] || $item === $cart_item['variation_id'] ) {
-						$items[$session_id] = $cart_item;
-					}
-				}
-			}
-		}
-		return $items;
-	}
-
-	/**
-	 * Define custom columns for products.
-	 *
-	 * @param  array $existing_columns
-	 *
-	 * @return array
-	 */
-	public function product_columns( $existing_columns ) {
-		$existing_columns = $this->array_insert_after( $existing_columns, 'is_in_stock', array( 'qty_in_carts' => __( 'Quantity in Carts', 'woocommerce-cart-stock-reducer' ) ) );
-
-		return $existing_columns;
-	}
-
-	public function array_insert_after( $array, $after_key, $new = array() ) {
-		$pos = array_search( $after_key, array_keys( $array ) );
-		$pos++;
-		$result = array_slice( $array, 0, $pos ) + $new + array_slice( $array, $pos );
-
-		return $result;
-	}
-
-	/**
-	 * Output custom columns for products.
-	 *
-	 * @param string $column
-	 */
-	public function render_product_columns( $column ) {
-		global $post, $the_product;
-
-		if ( 'qty_in_carts' === $column ) {
-
-			if ( empty( $the_product ) || $the_product->get_id() != $post->ID ) {
-				$the_product = wc_get_product( $post );
-			}
-
-			// Only continue if we have a product.
-			if ( empty( $the_product ) ) {
-				return;
-			}
-
-			echo (int) $this->quantity_in_carts( $post->ID );
-		}
-
-	}
 }
