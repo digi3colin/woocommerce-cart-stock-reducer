@@ -647,7 +647,7 @@ class WC_Cart_Stock_Reducer extends WC_Integration {
 		$id = false;
 
 		if ( version_compare( WC_VERSION, '3.0', '<' ) ) {
-			if ( null !== $product ) {
+			if ( !empty( $product ) ) {
 				$managing_stock = $product->managing_stock();
 				if ( ! empty( $product->variation_id ) ) {
 					if ( true === $managing_stock ) {
@@ -681,7 +681,7 @@ class WC_Cart_Stock_Reducer extends WC_Integration {
 			}
 		} else {
 			// WooCommerce 3.0 changed products over to CRUD, so we need to treat it differently
-			if ( null !== $product ) {
+			if ( !empty( $product ) ) {
 				$managing_stock = $product->managing_stock();
 				if ( 'parent' === $managing_stock ) {
 					$id = $product->get_parent_id();
@@ -881,13 +881,21 @@ class WC_Cart_Stock_Reducer extends WC_Integration {
 		$earliest = false;
 		if ( $items = $this->sessions->find_items_in_carts( $item_id ) ) {
 			$customer_id = $this->get_customer_id();
-			foreach ( $items as $id => $cart_item ) {
-				if ( $customer_id == $id ) {
+			foreach ( $items as $cart_id => $cart ) {
+				if ( $customer_id == $cart_id ) {
 					// Skip customers own items
 					continue;
 				}
-				if ( isset( $cart_item['csr_expire_time'] ) && ( false === $earliest || $cart_item['csr_expire_time'] < $earliest ) ) {
-					$earliest = $cart_item['csr_expire_time'];
+				foreach ( $cart as $cart_item ) {
+					if ( isset( $cart_item['csr_expire_time'] ) ) {
+						if ( $this->is_expired( $cart_item['csr_expire_time'] ) ) {
+							# Ignore expired items
+							continue;
+						}
+						if ( false === $earliest || $cart_item['csr_expire_time'] < $earliest ) {
+							$earliest = $cart_item['csr_expire_time'];
+						}
+					}
 				}
 			}
 		}
@@ -1024,7 +1032,7 @@ class WC_Cart_Stock_Reducer extends WC_Integration {
 		}
 
 		// Make sure backend admin always shows real status
-		$contains_functions = array( 'render_product_columns' );
+		$contains_functions = array( 'render_product_columns', 'render_is_in_stock_column' );
 
 		if ( false === apply_filters( 'wc_csr_hide_out_of_stock_items', false, $this, $status, $product ) ) {
 			// If this is a product visibility check, don't check virtual status
@@ -1044,7 +1052,7 @@ class WC_Cart_Stock_Reducer extends WC_Integration {
 
 	public function product_get_stock_quantity( $quantity, $product ) {
 		if ( false === $this->checking_virtual_stock ) {
-			$never_virtual_whitelist = array( 'wc_reduce_stock_levels', 'render_product_columns' );
+			$never_virtual_whitelist = array( 'wc_reduce_stock_levels', 'render_product_columns', 'validate_props', 'render_is_in_stock_column' );
 			if ( $this->trace_contains( $never_virtual_whitelist ) ) {
 				// For WooCommerce 3.x we need to make sure we return the real quantity to these functions
 				// otherwise they mark items as out of stock
